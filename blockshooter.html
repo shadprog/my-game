@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Space Invader Pro</title>
+<style>
+    body { margin: 0; overflow: hidden; background: #000; font-family: 'Courier New', Courier, monospace; }
+    canvas { display: block; margin: 0 auto; background: radial-gradient(circle, #111 0%, #000 100%); border-left: 2px solid #222; border-right: 2px solid #222; }
+    #ui { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); width: 400px; display: flex; justify-content: space-between; align-items: center; color: #0f0; font-size: 20px; pointer-events: none; text-shadow: 0 0 10px #0f0; z-index: 10; }
+    #ui button { pointer-events: auto; background: rgba(0, 255, 0, 0.1); border: 1px solid #0f0; color: #0f0; padding: 5px 15px; cursor: pointer; font-family: inherit; font-size: 14px; border-radius: 4px; display: none; }
+    #ui button:hover { background: rgba(0, 255, 0, 0.2); }
+    #overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); display: flex; flex-direction: column; justify-content: center; align-items: center; color: white; text-align: center; z-index: 20; padding: 20px; box-sizing: border-box; }
+    .btn { margin-top: 20px; padding: 15px 30px; background: #0f0; color: #000; border: none; font-weight: bold; cursor: pointer; font-family: inherit; }
+    #touchControls { position: absolute; bottom: 20px; width: 100%; display: none; justify-content: space-around; pointer-events: none; z-index: 10; }
+    .tBtn { width: 70px; height: 70px; background: rgba(255,255,255,0.2); border-radius: 50%; pointer-events: auto; display: flex; align-items: center; justify-content: center; color: white; font-size: 30px; user-select: none; }
+    @media (pointer: coarse) { #touchControls { display: flex; } }
+</style>
+</head>
+<body>
+
+<div id="ui">
+    <div>SCORE: <span id="scoreVal">0</span></div>
+    <button id="pauseBtn" onclick="togglePause()">PAUSE</button>
+    <div id="powerTimer" style="color: #ff0; visibility: hidden;">POWER-UP ACTIVE</div>
+</div>
+
+<div id="overlay">
+    <div id="introContent">
+        <h1 style="color: #0f0;">MISSION BRIEFING</h1>
+        <p>The tyrant ruler <strong style="color: #f00;">SHAREEF</strong> has deployed his block-legions to consume Earth.</p>
+        <p>Intercept the waves and survive long enough to face him.</p>
+        <div style="margin: 20px 0; padding: 15px; background: rgba(0,255,0,0.1); border: 1px solid #0f0; font-size: 14px; text-align: left; display: inline-block;">
+            <strong style="color: #0f0;">CONTROLS:</strong><br>
+            ⌨️ <strong>Keyboard:</strong> [A/D] or [Arrows] to Move | [Space] to Shoot | [P] to Pause<br>
+            📱 <strong>Touch:</strong> Hold & Drag anywhere to Move and Shoot
+        </div>
+        <br>
+        <button class="btn" onclick="startGame()">START DEFENSE</button>
+    </div>
+    <h3 id="deathMsg" style="font-size: 32px; color: #ff3333; display: none; margin-bottom: 10px;">DUE TO YOUR WEAKNESS EARTH HAS FALLEN</h3>
+    <p id="finalScore"></p>
+    <button id="restartBtn" class="btn" onclick="startGame()" style="display: none;">RESTART MISSION</button>
+    <p id="restartHint" style="color: #888; display: none;">(or Press ENTER)</p>
+</div>
+
+<canvas id="gameCanvas"></canvas>
+
+<script>
+/** @type {HTMLCanvasElement} */
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+const scoreEl = document.getElementById("scoreVal");
+const overlay = document.getElementById("overlay");
+const introContent = document.getElementById("introContent");
+const deathMsg = document.getElementById("deathMsg");
+const finalScoreEl = document.getElementById("finalScore");
+const powerTimerEl = document.getElementById("powerTimer");
+
+canvas.width = 450;
+canvas.height = window.innerHeight;
+
+let score = 0, gameState = 'intro', keys = {}, touchActive = false, touchX = 0;
+let stars = Array.from({length: 50}, () => ({x: Math.random()*canvas.width, y: Math.random()*canvas.height, s: Math.random()*2}));
+
+// Game Entities
+let particles = [];
+let powerups = [];
+let bullets = [];
+let bossBullets = [];
+let enemies = [];
+let weaponLevel = 1;
+let powerupTimer = 0;
+let bossEncounters = 0;
+let nextBossScore = 30;
+let bossTaunt = "";
+let bossTauntTimer = 0;
+let nextWaveTimer = 0;
+const taunts = ["Puny human!", "Shareef is inevitable!", "You call that shooting?", "Earth belongs to ME!", "Your resistance is futile!"];
+
+let player = {
+    x: canvas.width / 2 - 20,
+    y: canvas.height - 80,
+    w: 40,
+    h: 40,
+    speed: 7,
+};
+
+// --- CLASSES ---
+
+class Particle {
+    constructor(x, y, color) {
+        this.x = x; this.y = y;
+        this.size = Math.random() * 3 + 2;
+        this.speedX = Math.random() * 6 - 3;
+        this.speedY = Math.random() * 6 - 3;
+        this.life = 1.0;
+        this.color = color;
+    }
+    update() {
+        this.x += this.speedX;
+        this.y += this.speedY;
+        this.life -= 0.02;
+    }
+    draw() {
+        ctx.fillStyle = this.color || `rgba(255, 100, 0, ${this.life})`;
+        ctx.fillRect(this.x, this.y, this.size, this.size);
+    }
+}
+
+let boss = { active: false, x: 150, y: -100, hp: 100, maxHp: 100, dir: 1, lastShot: 0 };
+
+// --- INPUTS ---
+function togglePause() {
+    if (gameState !== 'playing' && gameState !== 'paused') return;
+    gameState = (gameState === 'playing') ? 'paused' : 'playing';
+    document.getElementById("pauseBtn").innerText = (gameState === 'paused') ? "RESUME" : "PAUSE";
+}
+
+window.addEventListener("keydown", e => {
+    keys[e.key] = true;
+    if (e.key.toLowerCase() === "p") togglePause();
+    if (e.key === "Enter" && (gameState === 'gameover' || gameState === 'intro')) startGame();
+    if (e.key === " " && gameState === 'playing') shoot();
+});
+window.addEventListener("keyup", e => keys[e.key] = false);
+
+// Touch Support
+function handleTouch(e) {
+    if (gameState !== 'playing') return;
+    e.preventDefault();
+    touchActive = true;
+    const rect = canvas.getBoundingClientRect();
+    touchX = e.touches[0].clientX - rect.left;
+}
+
+canvas.addEventListener("touchstart", handleTouch, {passive: false});
+canvas.addEventListener("touchmove", handleTouch, {passive: false});
+canvas.addEventListener("touchend", () => { 
+    touchActive = false; 
+    keys["ArrowLeft"] = false; 
+    keys["ArrowRight"] = false; 
+}, {passive: false});
+
+function startGame() {
+    score = 0;
+    scoreEl.innerText = "0";
+    enemies = []; bullets = []; bossBullets = []; powerups = []; particles = [];
+    weaponLevel = 1; powerupTimer = 0;
+    bossEncounters = 0;
+    nextBossScore = 30;
+    bossTauntTimer = 0;
+    nextWaveTimer = 0;
+    boss.active = false; boss.hp = 100; boss.y = -100;
+    player.x = canvas.width / 2 - 20;
+    gameState = 'playing';
+    overlay.style.display = "none";
+    document.getElementById("restartBtn").style.display = "none";
+    document.getElementById("restartHint").style.display = "none";
+    document.getElementById("pauseBtn").style.display = "block";
+}
+
+let lastShot = 0;
+function shoot() {
+    const now = Date.now();
+    const delay = 250;
+    if (now - lastShot < delay) return;
+    lastShot = now;
+
+    const bSpeed = 12;
+
+    if (weaponLevel === 1) { 
+        bullets.push({x: player.x + 18, y: player.y, vx: 0, vy: -bSpeed});
+    } else if (weaponLevel === 2) {
+        bullets.push({x: player.x + 5, y: player.y, vx: -3, vy: -bSpeed});
+        bullets.push({x: player.x + 20, y: player.y, vx: 0, vy: -bSpeed});
+        bullets.push({x: player.x + 35, y: player.y, vx: 3, vy: -bSpeed});
+    } else if (weaponLevel === 3) {
+        bullets.push({x: player.x + 0, y: player.y, vx: -4, vy: -bSpeed});
+        bullets.push({x: player.x + 13, y: player.y, vx: -1.5, vy: -bSpeed});
+        bullets.push({x: player.x + 26, y: player.y, vx: 1.5, vy: -bSpeed});
+        bullets.push({x: player.x + 40, y: player.y, vx: 4, vy: -bSpeed});
+    } else {
+        for(let i = 0; i < 5; i++) {
+            bullets.push({x: player.x + (i * 10), y: player.y, vx: (i - 2) * 2.5, vy: -bSpeed});
+        }
+    }
+}
+
+let spawnTimer = 0;
+function spawnEnemy() {
+    if (boss.active) return;
+    spawnTimer++;
+    if (spawnTimer > 30) {
+        enemies.push({
+            x: Math.random() * (canvas.width - 40),
+            y: -50, w: 40, h: 40,
+            speed: 1.5 + (score / 500)
+        });
+        spawnTimer = 0;
+    }
+    
+    if (score >= nextBossScore && !boss.active && bossEncounters < 2) {
+        boss.active = true;
+        bossEncounters++;
+        boss.y = -100;
+        boss.hp = 100 + (Math.floor(score / 30) * 20);
+        boss.maxHp = boss.hp;
+        bossTaunt = taunts[Math.floor(Math.random() * taunts.length)];
+        bossTauntTimer = 180;
+    }
+}
+
+function createExplosion(x, y) {
+    for(let i=0; i<20; i++) particles.push(new Particle(x, y));
+}
+
+function update() {
+    if (gameState !== 'playing') return;
+
+    spawnEnemy();
+
+    if ((keys["ArrowLeft"] || keys["a"]) && player.x > 0) player.x -= player.speed;
+    if ((keys["ArrowRight"] || keys["d"]) && player.x < canvas.width - player.w) player.x += player.speed;
+
+    // Continuous Touch Logic
+    if (touchActive) {
+        let targetX = touchX - player.w / 2;
+        let dist = targetX - player.x;
+        if (Math.abs(dist) > 5) {
+            player.x += Math.sign(dist) * player.speed;
+        }
+        if (player.x < 0) player.x = 0;
+        if (player.x > canvas.width - player.w) player.x = canvas.width - player.w;
+        shoot();
+    }
+
+    if (powerupTimer > 0) powerupTimer--;
+    else weaponLevel = 1;
+
+    if (bossTauntTimer > 0) bossTauntTimer--;
+    if (nextWaveTimer > 0) nextWaveTimer--;
+
+    powerTimerEl.style.visibility = (weaponLevel > 1) ? "visible" : "hidden";
+    if (weaponLevel > 1) powerTimerEl.innerText = `${weaponLevel + 1} BULLET MODE`;
+
+    // Boss Bullets logic
+    for (let i = bossBullets.length - 1; i >= 0; i--) {
+        let b = bossBullets[i];
+        b.y += 5;
+        if (b.x < player.x + player.w && b.x + 10 > player.x && b.y < player.y + player.h && b.y + 10 > player.y) {
+            gameOver();
+        } else if (b.y > canvas.height) bossBullets.splice(i, 1);
+    }
+
+    // Bullets logic
+    for (let i = bullets.length - 1; i >= 0; i--) {
+        let b = bullets[i];
+        b.x += b.vx;
+        b.y += b.vy;
+
+        // Bounce off side walls
+        if (b.x <= 0 || b.x >= canvas.width - 4) {
+            b.vx *= -1;
+        }
+        // Remove if leaves top or bottom
+        if (b.y <= 0 || b.y > canvas.height) {
+            bullets.splice(i, 1);
+        }
+    }
+
+    // Powerups
+    for (let i = powerups.length - 1; i >= 0; i--) {
+        let p = powerups[i];
+        p.y += 6;
+        if (p.x < player.x + player.w && p.x + 25 > player.x && p.y < player.y + player.h && p.y + 25 > player.y) {
+            if (p.type === '3') weaponLevel = 2;
+            if (p.type === '4') weaponLevel = 3;
+            if (p.type === '5') weaponLevel = 4;
+            powerupTimer = 600;
+            powerups.splice(i, 1);
+        } else if (p.y > canvas.height) powerups.splice(i, 1);
+    }
+
+    // Boss Logic
+    if (boss.active) {
+        if (boss.y < 80) boss.y += 1;
+        boss.x += boss.dir * 2;
+        if (boss.x <= 0 || boss.x >= canvas.width - 100) boss.dir *= -1;
+
+        // Collision bullets vs boss
+        for (let bi = bullets.length - 1; bi >= 0; bi--) {
+            let b = bullets[bi];
+            if (b.x > boss.x && b.x < boss.x + 100 && b.y < boss.y + 60) {
+                boss.hp--;
+                bullets.splice(bi, 1);
+                createExplosion(b.x, b.y);
+                
+                // Retreat logic for first encounter (10% damage) or standard defeat
+                const isFirstEncounter = (nextBossScore === 30);
+                const shouldRetreat = isFirstEncounter && boss.hp <= boss.maxHp * 0.9;
+
+                if (boss.hp <= 0 || shouldRetreat) {
+                    createExplosion(boss.x + 50, boss.y + 30);
+                    if (shouldRetreat) bossTaunt = "This was just a test! Farewell!";
+                    boss.active = false;
+                    score += 500;
+                    scoreEl.innerText = score;
+                    nextBossScore = score + 500; // Set next encounter for 500 points later
+                    nextWaveTimer = 180;
+                    spawnTimer = 30; // Force immediate enemy spawn
+                }
+            }
+        }
+
+        // Boss Shooting
+        if (Date.now() - boss.lastShot > 1500) {
+            bossBullets.push({x: boss.x + 45, y: boss.y + 50});
+            boss.lastShot = Date.now();
+        }
+    }
+
+    // Enemies
+    for (let i = enemies.length - 1; i >= 0; i--) {
+        let e = enemies[i];
+        e.y += e.speed;
+        
+        let collided = e.x < player.x + player.w && e.x + e.w > player.x && e.y < player.y + player.h && e.y + e.h > player.y;
+        if (e.y > canvas.height || collided) {
+            gameOver();
+            return;
+        }
+
+        for (let j = bullets.length - 1; j >= 0; j--) {
+            let b = bullets[j];
+            if (b.x < e.x + e.w && b.x + 5 > e.x && b.y < e.y + e.h && b.y + 15 > e.y) {
+                createExplosion(e.x + 20, e.y + 20);
+                if (Math.random() > 0.8) {
+                    let types = ['3', '4', '5'];
+                    powerups.push({x: e.x, y: e.y, type: types[Math.floor(Math.random() * types.length)]});
+                }
+                enemies.splice(i, 1);
+                bullets.splice(j, 1);
+                score++;
+                scoreEl.innerText = score;
+                break;
+            }
+        }
+    }
+
+    for (let i = particles.length - 1; i >= 0; i--) {
+        let p = particles[i];
+        p.update();
+        if (p.life <= 0) particles.splice(i, 1);
+    }
+}
+
+function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "white";
+    stars.forEach(s => { ctx.fillRect(s.x, s.y, s.s, s.s); s.y = (s.y + 1) % canvas.height; });
+
+    if (gameState === 'paused') {
+        ctx.fillStyle = "white"; ctx.font = "40px Courier"; ctx.fillText("PAUSED", canvas.width/2 - 60, canvas.height/2);
+    }
+
+    // Draw Player
+    ctx.fillStyle = "white";
+    ctx.font = "38px Arial";
+    ctx.fillText("🛸", player.x, player.y + 35);
+
+    // Boss Shareef
+    if (boss.active) {
+        ctx.font = "60px Arial"; ctx.fillText("👹", boss.x, boss.y + 50);
+        ctx.fillStyle = "red"; ctx.fillRect(boss.x, boss.y - 10, (boss.hp/boss.maxHp)*100, 5);
+        ctx.fillStyle = "white"; ctx.font = "14px Courier"; ctx.fillText("SHAREEF", boss.x, boss.y - 15);
+    }
+
+    powerups.forEach(p => { 
+        ctx.fillStyle = "#ff0"; ctx.font = "bold 20px Arial"; ctx.fillText(p.type, p.x, p.y); 
+    });
+
+    // Projectile Glow and Trails
+    ctx.save();
+    ctx.shadowBlur = 15;
+
+    // Boss Bullets (Red Glow)
+    ctx.shadowColor = "#f00";
+    ctx.fillStyle = "#f00";
+    bossBullets.forEach(b => ctx.fillRect(b.x, b.y, 10, 10));
+
+    // Player Bullets (Cyan Glow + Motion Trail)
+    ctx.shadowColor = "#0ff";
+    bullets.forEach(b => {
+        ctx.fillStyle = "#0ff";
+        // Motion Trail
+        ctx.globalAlpha = 0.3;
+        ctx.fillRect(b.x - b.vx * 1.5, b.y - b.vy * 1.5, 4, 15);
+        // Main Bullet
+        ctx.globalAlpha = 1.0;
+        ctx.fillRect(b.x, b.y, 4, 15);
+    });
+
+    if (bossTauntTimer > 0) {
+        ctx.fillStyle = "#f00";
+        ctx.font = "bold 20px Courier";
+        ctx.textAlign = "center";
+        ctx.fillText(`SHAREEF: "${bossTaunt}"`, canvas.width/2, 150);
+    }
+    if (nextWaveTimer > 0) {
+        ctx.fillStyle = "#0f0";
+        ctx.font = "bold 30px Courier";
+        ctx.textAlign = "center";
+        ctx.fillText("NEXT WAVE INCOMING...", canvas.width/2, canvas.height/2);
+    }
+    ctx.textAlign = "start"; // Reset alignment
+    ctx.restore();
+    
+    ctx.font = "30px Arial"; enemies.forEach(e => ctx.fillText("👾", e.x, e.y + 30));
+    particles.forEach(p => p.draw());
+}
+
+function gameOver() {
+    gameState = 'gameover';
+    introContent.style.display = "none";
+    deathMsg.style.display = "block";
+    document.getElementById("restartBtn").style.display = "inline-block";
+    document.getElementById("restartHint").style.display = "block";
+    document.getElementById("pauseBtn").style.display = "none";
+    overlay.style.display = "flex";
+    finalScoreEl.innerText = "Final Score: " + score;
+}
+
+function gameLoop() {
+    update();
+    draw();
+    requestAnimationFrame(gameLoop);
+}
+gameLoop();
+</script>
+</body>
+</html>
